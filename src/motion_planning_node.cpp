@@ -15,7 +15,14 @@
 // To run this node in a given namespace with rosrun (for example 'my_gen3'), start a Kortex driver and then run : 
 // rosrun kortex_examples example_moveit_trajectories.py __ns:=my_gen3
 
-int main(int argc, char *argv[]){
+class Commander
+{
+
+};
+
+
+int main(int argc, char *argv[])
+{
 
     ros::init(argc, argv, "motion_planner_node");
     ros::NodeHandle nh();

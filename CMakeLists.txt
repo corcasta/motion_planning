@@ -57,7 +57,7 @@ add_executable(${PROJECT_NAME}_node src/motion_planning_node.cpp)
 target_link_libraries(${PROJECT_NAME}_node ${catkin_LIBRARIES} ${Boost_LIBRARIES})
 install(TARGETS ${PROJECT_NAME}_node DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
 
-install(DIRECTORY launch worlds DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION} FILES_MATCHING PATTERN "*.launch")
+install(DIRECTORY scripts launch rviz worlds DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION} FILES_MATCHING PATTERN "*.launch")
 
 # Gazebo is compiled with Protobuf 2.6.1 and Kortex with Protobuf 3.5.1
 # The 2.6.1 includes are prepended to the include_directories so the Gazebo plugins we compile here build
