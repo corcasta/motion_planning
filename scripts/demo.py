@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+import math
 import copy
 import rospy
 import moveit_commander
@@ -8,7 +9,10 @@ import moveit_msgs.msg
 import geometry_msgs.msg
 from math import pi
 from std_srvs.srv import Empty
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseStamped
+from moveit_msgs.msg import Grasp 
+from trajectory_msgs.msg import JointTrajectoryPoint
+from tf.transformations import quaternion_from_euler
 
 # The 3 main classes that we need: RobotCommander PlanningSceneInterface MoveGroupCommander
 # RobotCommander: provides information of robots kinematics and joint states
@@ -86,6 +90,7 @@ class ExampleMoveItTrajectories(object):
         else:
             print("Can NOT find a plan for that pose")
             return False
+
 
     def set_home_joint_angles(self):
         # Get the current joint positions
@@ -181,8 +186,7 @@ class ExampleMoveItTrajectories(object):
 
 
     def reach_gripper_position(self, relative_position):
-        gripper_group = self.gripper_group
-        
+
         # We only have to move this joint because all others are mimic!
         gripper_joint = self.robot.get_joint(self.gripper_joint_name)
         gripper_max_absolute_pos = gripper_joint.max_bound()
@@ -194,14 +198,198 @@ class ExampleMoveItTrajectories(object):
             return False 
 
 
+    def controlGripper(self, action, posture):
+        """
+        action: type string, represents ("closed", "openED")
+        posutre: type trajectory_msgs.msg.JointTrajectory,  Gripper posture
+
+        This function is meant to be used inside the pick and place pipeline
+        """
+
+        # In this case 0 means open, 0.5 half closed
+        if action == "open":
+            relative_position = 0
+        elif action == "closed":
+            relative_position = 0.5
+        else:
+            print("Action must be: (open or closed)")
+
+        # We only have to move this joint because all others are mimic!
+        gripper_joint = self.robot.get_joint(self.gripper_joint_name)
+        gripper_max_absolute_pos = gripper_joint.max_bound()
+        gripper_min_absolute_pos = gripper_joint.min_bound()
+
+        posture.joint_names = [str for i in range(4)]
+        posture.joint_names[0] = "left_finger_bottom_joint"
+        posture.joint_names[1] = "left_finger_tip_joint"
+        posture.joint_names[2] = "right_finger_bottom_joint"
+        posture.joint_names[3] = "right_finger_tip_joint"
+        print(f"Gripper name: {self.gripper_joint_name}")
+
+        ## Set them as open, wide enough for the object to fit. ##
+        posture.points = [JointTrajectoryPoint()]
+        posture.points[0].positions = [float for i in range(4)]
+        posture.points[0].positions[0] = 0 #relative_position * (gripper_max_absolute_pos - gripper_min_absolute_pos) + gripper_min_absolute_pos
+        posture.points[0].positions[1] = 0
+        posture.points[0].positions[2] = 0.96
+        posture.points[0].positions[3] = 0   
+        posture.points[0].time_from_start = rospy.Duration(0.5)
+
+    def addCollisionObjects(self):
+        """
+        -Currently: Add collision objects to the scene.
+        
+        -For the moment we are adding hardcoded objects for testing.
+         The correct implementation if this function should be about
+         adding target objects for future grasping.
+        """
+
+        ## - BEGIN_SUB_TUTORIAL table1 - ##
+        # Creating Environment
+
+        ## Create vector to hold 3 collision objects. ##
+        collision_objects_names = [str for i in range(3)]
+        collision_object_sizes = [str for i in range(3)]
+        collision_objects = [PoseStamped() for i in range(3)]
+
+        ## Add the first table where the cube will originally be kept. ##
+        collision_objects_names[0] = "table1"
+        collision_objects[0].header.frame_id = "base_link"
+
+        ## Define the primitive and its dimensions. ##
+        collision_object_sizes[0] = (0.2, 0.4, 0.4)  # Box size
+
+        ## Define the pose of the table. ##
+        collision_objects[0].pose.position.x = 0.5
+        collision_objects[0].pose.position.y = 0
+        collision_objects[0].pose.position.z = 0.2
+        ## - END_SUB_TUTORIAL - ##
+
+        ## - BEGIN_SUB_TUTORIAL table2 - ##
+        ## Add the second table where we will be placing the cube. ##
+        collision_objects_names[1] = "table2"
+        collision_objects[1].header.frame_id = "base_link"
+
+        ## Define the primitive and its dimensions. ##
+        collision_object_sizes[1] = (0.4, 0.2, 0.4)  # Box size
+
+        ## Define the pose of the table. ##
+        collision_objects[1].pose.position.x = 0
+        collision_objects[1].pose.position.y = 0.5
+        collision_objects[1].pose.position.z = 0.2
+
+        ## Define the object that we will be manipulating ##
+        collision_objects_names[2] = "object"
+        collision_objects[2].header.frame_id = "base_link"
+
+        ## Define the primitive and its dimensions. ##
+        collision_object_sizes[2] = (0.02, 0.02, 0.2)  # Box size
+
+        ## Define the pose of the object. ##
+        collision_objects[2].pose.position.x = 0.5
+        collision_objects[2].pose.position.y = 0
+        collision_objects[2].pose.position.z = 0.5
+        ## - END_SUB_TUTORIAL - ##
+
+        ## Add collision objects to scene ##
+        for (name, pose, size) in zip(collision_objects_names, collision_objects, collision_object_sizes):
+            self.scene.add_box(name=name, pose=pose, size=size)
+
+
+    def pick(self, move_group):
+        """
+        Pick object.
+        """
+
+        ## - BEGIN_SUB_TUTORIAL pick1 - ##
+        ## Create a vector of grasps to be attempted, currently only creating single grasp. ##
+        # This is essentially useful when using a grasp generator to generate and test multiple grasps.
+        grasps = [Grasp() for i in range(1)]
+
+        ## Setting grasp pose ##
+        # This is the pose of end_effector_link. |br|
+        # From end_effector_link to the palm of the tool_frame the distance is 0.058, the cube starts 0.01 before 5.0 (half of the length
+        # of the cube). |br|
+        # Therefore, the position for end_effector_link = 5 - (length of cube/2 - distance b/w end_effector_link and palm of tool_frame - some
+        # extra padding)
+        grasps[0].grasp_pose.header.frame_id = "base_link"
+        orientation = quaternion_from_euler(-math.pi /
+                                            2, -math.pi / 4, -math.pi / 2)
+        grasps[0].grasp_pose.pose.orientation.x = orientation[0]
+        grasps[0].grasp_pose.pose.orientation.y = orientation[1]
+        grasps[0].grasp_pose.pose.orientation.z = orientation[2]
+        grasps[0].grasp_pose.pose.orientation.w = orientation[3]
+        grasps[0].grasp_pose.pose.position.x = 0.415
+        grasps[0].grasp_pose.pose.position.y = 0
+        grasps[0].grasp_pose.pose.position.z = 0.5
+
+        ## Setting pre-grasp approach ##
+        # Defined with respect to frame_id
+        grasps[0].pre_grasp_approach.direction.header.frame_id = "base_link"
+        # Direction is set as positive x axis
+        grasps[0].pre_grasp_approach.direction.vector.x = 1.0
+        grasps[0].pre_grasp_approach.min_distance = 0.095
+        grasps[0].pre_grasp_approach.desired_distance = 0.115
+
+        ## Setting post-grasp retreat ##
+        # Defined with respect to frame_id
+        grasps[0].post_grasp_retreat.direction.header.frame_id = "base_link"
+        # Direction is set as positive z axis
+        grasps[0].post_grasp_retreat.direction.vector.z = 1.0
+        grasps[0].post_grasp_retreat.min_distance = 0.1
+        grasps[0].post_grasp_retreat.desired_distance = 0.25
+
+        ## Setting posture of eef before grasp ##
+        self.controlGripper("open", grasps[0].pre_grasp_posture)
+        ## - END_SUB_TUTORIAL - ##
+
+        ## - BEGIN_SUB_TUTORIAL pick2 - ##
+        ## Setting posture of eef during grasp ##
+        self.controlGripper("closed", grasps[0].grasp_posture)
+
+        ## Set support surface as table1. ##
+        move_group.set_support_surface_name("table1")
+        
+        print(f"DEBUG POSITION CALL: {grasps[0].grasp_posture.points[0].positions[0]}") 
+
+        print("DEBUG: BEFORE PICK CALL")
+        # Call pick to pick up the object using the grasps given
+        move_group.pick("object", grasps)
+        print("DEBUG: AFTER PICK CALL")
+        ## - END_SUB_TUTORIAL - ##
+
+
+
+
+
 def main():
     example = ExampleMoveItTrajectories()
-    
     success = example.is_init_success
 
-    example.set_home_joint_angles()
+    example.addCollisionObjects() #it works
+    rospy.sleep(1.0)
 
-    
+    #print(f"Has EF?: {example.arm_group.has_end_effector_link()}")
+    #move_group = example.robot.get_group("arm")
+    #example.pick(move_group)
+
+    eef_link = example.arm_group.get_end_effector_link()
+    print("============ End effector link: %s" % eef_link)
+
+    group_names = example.robot.get_group_names()
+    print("============ Available Planning Groups:", example.robot.get_group_names())
+
+    box_name = "object"
+    grasping_group = "gripper"
+    touch_links = example.robot.get_link_names(group=grasping_group)
+    example.scene.attach_box(eef_link, box_name, touch_links=touch_links)
+
+
+    #example.scene.remove_attached_object(eef_link, name=box_name)
+
+    # TESTING ALL FUNCTION IMPLEMENTATIONS
+    """
+    example.set_home_joint_angles()
     if success:
         demo_pose = Pose()
         demo_pose.position.x = 0.28
@@ -235,6 +423,8 @@ def main():
             joint_positions[5] = pi/2
         success &= example.reach_joint_angles("arm", joint_positions, 0.01)
         print(f"Test 3: {success}")
+    """
+
 
     """
     # For testing purposes
